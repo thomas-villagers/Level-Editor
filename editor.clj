@@ -14,10 +14,19 @@
 (def levelmap (ref {}))
 (def scale (ref 1.0))
 (def raster (ref [32 32]))
-(def background-image (ref nil))
 (def screen-size (ref (screen-sizes :iconia-500)))
 (def world-size (ref [1 1]))
 (def current-path (ref  "."))
+
+(def-object background
+  [image (ref nil)
+   file (ref nil)]
+  {:load (fn [f]
+           (dosync (ref-set file f)
+                   (ref-set image (ImageIO/read f))))
+   :image (fn [] @image)
+   :name (fn [] (.getName @file))
+   :path (fn [] (when @file (.getPath @file)))})
 
 (def-object tile
   [size (ref [64 64])
@@ -124,18 +133,19 @@
 (defn open-dialog-png [parent title]
   (open-dialog parent "PNG Images" (into-array [ "png" ]) title))
 
-(defn save-dialog [parent]
-  (let [filter (javax.swing.filechooser.FileNameExtensionFilter. "Tile Maps" (into-array [ "tile" ]))
+(defn save-dialog [parent desc exts title]
+  (let [filter (javax.swing.filechooser.FileNameExtensionFilter. desc exts );; "Tile Maps" (into-array [ "tile" ]))
         chooser (doto
                     (JFileChooser. (java.io.File. "."))
-                  (.setFileFilter filter))
+                  (.setFileFilter filter)
+                  (.setDialogTitle "Save Tile Map"))
         value  (.showSaveDialog chooser parent)]
     (when (= value JFileChooser/APPROVE_OPTION)
       (.getSelectedFile chooser))))
                                   
 (defn background-dialog [parent]
   (when-let [file (open-dialog-png parent "Load Background Image")]
-    (dosync (ref-set background-image (ImageIO/read file)))))
+    (background :load file)))
 
 (defn tilemap-dialog [parent]                
   (let [dialog (JDialog.) ;; parent)
@@ -266,8 +276,8 @@
       (.setVisible true))))
 
 (defn save-tile-map [parent]
-  (when-let [filename (save-dialog parent)]
-    (with-open [f (clojure.java.io/writer filename)]
+  (when-let [file (save-dialog parent "Tile Maps" (into-array [ "tile" ]) "Save Tile Map")]
+    (with-open [f (clojure.java.io/writer file)]
       (do
         (println (tile :image-name))
         (.write f (println-str (tile :image-name)))
@@ -276,15 +286,26 @@
           (doseq-to tiles
                     #(.write f (println-str (apply list (func %))))))))))
 
+(defn get-relative-path [base path]
+  (let [fb (.toURI (java.io.File. base))
+        fp (.toURI (java.io.File. path))]
+    (.getPath (.relativize fb fp))))
+
+(defn only-path [file]
+  (let [filename (.getName file)
+        path (.getPath file)]
+    (apply str (drop-last (count filename) path))))
+
 (defn load-tile-map* [filename]  
   (let [lines   (line-seq (java.io.BufferedReader. (java.io.StringReader. (slurp filename))))
-        image (tile :image  (java.io.File. (first lines)))]
+        path (str (only-path (java.io.File. filename)) (first lines))
+        image (tile :image  (java.io.File. path))]
     (vec (for [x (rest lines)]
            (update-tile-image image (conj (zipmap [:name :x :y :width :height] (read-string x)) {:image :nil}))))))
 
 (defn load-tile-map [parent]
   (when-let [file (open-dialog parent "Tile files" (into-array [ "tile" ]) "Load Tile Map")]
-    (dosync (ref-set tile-images (load-tile-map* (.getName file))))
+    (dosync (ref-set tile-images (load-tile-map* (.getPath file))))
     (tile :current 0)
     (show-tilemap)))
 
@@ -293,26 +314,44 @@
     (binding [*read-eval* false]
       (reduce conj [] (read rdr)))))
 
-(defn parse-object [ line ]
+(defn parse-object-from-list [ line ]
   (let [name (first line)
         {:keys [width height] :as tile} (first (filter #(= (:name %) name) @tile-images))
         data (map #(map - % [(* 0.5 width)  (* 0.5 height)]) (rest line))
-;;        data (map #(list (- (first %) (* 0.5 width)) (- (second %) (* 0.5 height)))  (rest line))    ;; map #(map + [w/2 h/2] %) (rest line) ) !!! 
         index (.indexOf @tile-images tile )
         value {:tile index :active true}]
     (zipmap data (repeat value))))
 
+
+
+;(defn get-relative-path [to from]  ;; (get-relative-path "/home/thomas/dev/clojure/ballz/background/bg_1_2.png" /home/thomas")
+;  (apply str (drop (count from) to)))
+
+
+
+(def-object loaded-level
+  [data (ref '())
+   file (ref nil)]
+  {:load (fn [f]
+          (dosync
+           (ref-set file f)
+           (ref-set data (load-data (.getPath f)))))
+   :data (fn [] @data)
+   :name (fn [] (.getName @file))
+   :path (fn [] (.getPath @file))})
+
+(def level-list (ref '()))
+
 (defn load-level* [file]
-  (let [filename (.getName file)
-        path (.getPath file)
-        x (load-data path)
-        path (apply str (drop-last (count filename) path))
+  (let [x (loaded-level :load file)
+        path (only-path file) 
         bgr-image ((comp str second first ) (filter #(= 'textures (first %)) x))
         o (filter #(= 'objects (first %)) x)]
-    (dosync (ref-set background-image (ImageIO/read (java.io.File. (str path bgr-image))))
-            (ref-set current-path path)
+    (background :load (java.io.File. (str path bgr-image)))
+    (dosync (ref-set current-path path)
+            (ref-set level-list x)
             (ref-set levelmap
-                     (into {} (map parse-object (rest (first o))))))
+                     (into {} (map parse-object-from-list (rest (first o))))))
     o))
 
 (defn load-level [parent]
@@ -322,26 +361,51 @@
   (when-let [file (open-dialog parent "Level files" (into-array [ "clj" ]) "Load Level")]
     (load-level* file)))
 
-;; SAVE LEVEL:
-;; -- if level loaded (<<-- filename !)
-;;    -- adjust objects & background in level
-;; -- else
-;;    -- make new level
 ;; 1. step: levelmap to list !
-
 (defn level-to-list [level]
-  (let [tile-nrs (distinct (map (comp :tile val) level))]
+  (let [tile-nrs (distinct (map (comp :tile val) level))
+        to-int (fn [x] (map #(int %) x))]
     (cons 'objects
-          (map (fn [x]
-                 (let [{:keys [name width height]} (@tile-images x)
-                       [width height] (map (partial * 0.5) [width height])
-                       objs (keys (filter #(= x (:tile (val %))) level))            ;; todo: filter active !! 
-                       sh-objs (map #(map + [width height] %) objs)]
-                   (cons name sh-objs))) tile-nrs))))
+          (filter #(> (count %) 1)
+                  (map (fn [x]
+                         (let [{:keys [name width height]} (@tile-images x)
+                               [width height] (map (partial * 0.5) [width height])
+                               objs (keys (filter #(and (:active (val %)) (= x (:tile (val %)))) level))         
+                               sh-objs (map #(to-int (map + [width height] %)) objs)]
+                           (cons name sh-objs))) tile-nrs)))))
+
+;; takes a loaded level list and replaces background and objects 
+(defn adjust-level [level-list back]
+  (let [textures (first (filter #(= 'textures (first %)) level-list))
+        it (.indexOf level-list textures)
+        io (.indexOf level-list (first (filter #(= 'objects (first %)) level-list)))
+        new-list (assoc level-list it (list* (first textures) back (rest (rest textures))))]
+   (assoc new-list io (level-to-list @levelmap))))  ;; ACHTUNG
+
+(defn new-level-list [back]
+  (let [[w h] @screen-size
+        border (list '(0 0) (list w 0) (list w h) (list 0 h))]
+    (vector (list 'textures (symbol back) 'sprites.png)
+            (list 'borders border )
+            (level-to-list @levelmap)
+            '(dynamic-objects (ball (100 100))))))
+
+(defn save-level [parent]
+  (when-let [file (save-dialog parent "Levels" (into-array [ "lvl" ]) "Save Level")]
+    (let [path (only-path file)
+          background-path (get-relative-path path (background :path))
+          level (if (empty? @level-list)
+                  (new-level-list background-path)
+                  (adjust-level @level-list background-path))]
+      (println level)
+      (dosync (ref-set current-path path))
+      (with-open [f (clojure.java.io/writer file)]
+        (doseq-to level
+                  #(.write f (println-str %)))))))
 
 
 (def menus
-  {"New Tile Map"
+  ["New Tile Map"
    (fn [parent]
      (tilemap-dialog parent))
    "Load Tile Map"
@@ -353,6 +417,8 @@
    "Load Level"
    (fn [parent]
      (load-level parent))
+   "Save Level"
+   (fn [parent] (save-level parent))
    "Background Image"
    (fn [parent]
      (background-dialog parent))
@@ -363,17 +429,18 @@
        (when selected
          (dosync (ref-set screen-size ((read-string selected) screen-sizes))))))
    "World Table"      (fn [_] (world-table))
-   "Tile Table"  (fn [_] (tile-table))})
+   "Tile Table"  (fn [_] (tile-table))
+   "Quit" (fn [_] (System/exit 0))])
 
 (defn menu-listener [parent]
-  (proxy [ActionListener] []
-    (actionPerformed [e]
-      ((menus (.getActionCommand e)) parent))))
+  (let [menus (apply hash-map menus)]
+    (proxy [ActionListener] []
+      (actionPerformed [e]
+        ((menus (.getActionCommand e)) parent)))))
 
 ;; todos: -- drag Tiles in World
 ;;        -- Unterstützung mehrerer Tilemaps
 ;;        -- raster offset
-;;        -- speichere Level
 
 (defn world-listener []
   (proxy [MouseListener] []
@@ -400,8 +467,8 @@
             g2 (.create g)
             [rx ry] @raster]
       (.scale g2 @scale @scale)
-      (when @background-image
-        (.drawImage g2 @background-image nil (int 0) (int 0)))
+      (when-let [back  (background :image)]
+        (.drawImage g2 back nil (int 0) (int 0)))
       (.drawRect g2 0 0 w h)                          
       (draw-grid g2 w h rx ry)
       (when @tile-images
@@ -414,22 +481,6 @@
       (draw-grid g2 w h (first @screen-size) (second @screen-size))))
     (actionPerformed [e]
       (.repaint this))))
-
-(defn ctile-panel []
-  (proxy [JPanel ActionListener] []
-    (paintComponent [g]
-      (proxy-super paintComponent g)
-      (when @tile-images
-        (.drawImage g (:image (@tile-images (tile :current))) 0 0 nil)))
-    (getPreferredSize []
-      (let [[x y] (tile :size)]
-      (Dimension. x y)))
-    (actionPerformed [e]
-      (.repaint this))))
-
-(defn lin-int [a b]
-  (fn [t]
-    (+ a (* t (- b a)))))
 
 (defn World [parent]
   (let [frame (JFrame. "World")
@@ -454,6 +505,22 @@
       (.setVisible true))
     (.start timer)))
 
+(defn ctile-panel []
+  (proxy [JPanel ActionListener] []
+    (paintComponent [g]
+      (proxy-super paintComponent g)
+      (when @tile-images
+        (.drawImage g (:image (@tile-images (tile :current))) 0 0 nil)))
+    (getPreferredSize []
+      (let [[x y] (tile :size)]
+      (Dimension. x y)))
+    (actionPerformed [e]
+      (.repaint this))))
+
+(defn lin-int [a b]
+  (fn [t]
+    (+ a (* t (- b a)))))
+
 (defn spr-layout
   ([x y w h] (javax.swing.SpringLayout$Constraints. (Spring/constant x) (Spring/constant y) (Spring/constant w) (Spring/constant h)))
   ([x y]     (javax.swing.SpringLayout$Constraints. (Spring/constant x) (Spring/constant y))))
@@ -471,6 +538,12 @@
                           (let [v (.getValue (.getSource e))]
                             (func v))))))
 
+(defn set-accelerator [ menu-item k ]
+  (.setAccelerator menu-item (javax.swing.KeyStroke/getKeyStroke k (java.awt.event.InputEvent/CTRL_MASK))))
+
+(defmacro key-event [ menu-item ev  ]
+  `(set-accelerator ~menu-item (. java.awt.event.KeyEvent ~ev)))
+      
 (defn App []                         
   (let [frame (JFrame. "Level Editor")
         spinnerx (JSpinner. (SpinnerNumberModel. (first @raster) 1 256 1))
@@ -481,11 +554,18 @@
         menu-bar (JMenuBar. )
         listener (menu-listener frame)
         menu (JMenu. "File")
-        menu-items (into [] (map #(JMenuItem. %) (keys menus)))
+        menu-items (into [] (map #(JMenuItem. %) (map first (partition 2 menus)))) ;; (keys menus)))
         slider (JSlider. -50 50 0)
         interpolator1 (lin-int 1 10)
         interpolator2 (lin-int 1 (/ 1 10))
         timer (Timer. 60 tile)]
+    (key-event (first menu-items) VK_N)
+    (key-event (menu-items 3) VK_L)
+    (key-event (menu-items 4) VK_S)
+    (key-event (menu-items 5) VK_B)
+    (key-event (menu-items 6) VK_W)
+    (key-event (menu-items 7) VK_T)
+    (key-event (menu-items 8) VK_Q)
     (doseq-to menu-items  #(.addActionListener % listener))
     (doseq-to menu-items .add menu)
     (doto menu-bar
