@@ -17,6 +17,7 @@
 (def screen-size (ref (screen-sizes :iconia-500)))
 (def world-size (ref [1 1]))
 (def current-path (ref  "."))
+(def level-list (ref '()))
 
 (def-object background
   [image (ref nil)
@@ -106,9 +107,9 @@
         [w h] [ (.getWidth image) (.getHeight image)]
         panel (doto (tilemap-panel image)
                 (.addMouseListener (tilemap-listener w h))
-                (.setPreferredSize (Dimension. w h)))
-        timer (Timer. 60 panel)]
-    (.start timer)
+                (.setPreferredSize (Dimension. w h)))]
+    (doto (Timer. 60 panel)
+      (.start))
     (doto (JFrame. "Tiles")
       (.add panel)
       (.pack)
@@ -120,35 +121,32 @@
     (dosync (ref-set tile-images (make-tile-images image w h)))
     (show-tilemap)))
 
-(defn open-dialog [parent desc exts title]
+(defn chooser-dialog [type parent desc exts title ]
   (let [filter (javax.swing.filechooser.FileNameExtensionFilter. desc exts)
-        chooser (doto
-                    (JFileChooser. (java.io.File. @current-path))
+        chooser (doto (JFileChooser. (java.io.File. @current-path))
                   (.setFileFilter filter)
                   (.setDialogTitle title))
-        value    (.showOpenDialog chooser parent)]
+        value (if (= type :load)
+                (.showOpenDialog chooser parent)
+                (.showSaveDialog chooser parent))]
     (when (= value JFileChooser/APPROVE_OPTION)
       (.getSelectedFile chooser))))
+  
+(defn open-dialog [parent desc exts title]
+  (chooser-dialog :load parent desc exts title))
 
+(defn save-dialog [parent desc exts title]
+  (chooser-dialog :save parent desc exts title))
+                                  
 (defn open-dialog-png [parent title]
   (open-dialog parent "PNG Images" (into-array [ "png" ]) title))
 
-(defn save-dialog [parent desc exts title]
-  (let [filter (javax.swing.filechooser.FileNameExtensionFilter. desc exts );; "Tile Maps" (into-array [ "tile" ]))
-        chooser (doto
-                    (JFileChooser. (java.io.File. "."))
-                  (.setFileFilter filter)
-                  (.setDialogTitle "Save Tile Map"))
-        value  (.showSaveDialog chooser parent)]
-    (when (= value JFileChooser/APPROVE_OPTION)
-      (.getSelectedFile chooser))))
-                                  
 (defn background-dialog [parent]
   (when-let [file (open-dialog-png parent "Load Background Image")]
     (background :load file)))
 
 (defn tilemap-dialog [parent]                
-  (let [dialog (JDialog.) ;; parent)
+  (let [dialog (JDialog. parent)
         [w h] (tile :size)
         spinnerx (JSpinner. (SpinnerNumberModel. w 1 256 1))
         spinnery (JSpinner. (SpinnerNumberModel. h 1 256 1))
@@ -186,9 +184,8 @@
       (getColumnName [col]
         (names col))
       (getValueAt [row col]
-        (let [[k v] ((vec @levelmap) row)
-              r [(first k) (second k) (:tile v) (:active v)]]
-          (r col)))
+        (let [[[x y] {:keys [tile active]}] ((vec @levelmap) row)]
+          ([x y tile active] col)))
       (isCellEditable [row col] true)
       (setValueAt [val row col]        
         (let [[k v] ((vec @levelmap) row)]
@@ -204,22 +201,20 @@
             3 (dosync
                 (alter levelmap #(assoc % k (assoc v :active val))))))) 
       (getColumnClass [col]
-        (let [[k v] ((vec @levelmap) 0)
-              r [(first k) (second k) (:tile v) (:active v)]]
-          (class (r col)))))))
+        (let [[[x y] {:keys [tile active]}]  ((vec @levelmap) 0)]
+          (class ([x y tile active] col)))))))
 
 (defn watch-table [ model reference tag ]
   (add-watch reference tag (fn [r k old new] (.fireTableDataChanged model))))
 
 (defn world-table []
-  (let [frame (JFrame. "World Table")
-        model (world-table-model)
+  (let [model (world-table-model)
         table (JTable. model)]
      (watch-table model levelmap :world-table)
-     (doto frame
-      (.add (JScrollPane. table))
-      (.pack)
-      (.setVisible true))))
+     (doto (JFrame. "World Table")
+       (.add (JScrollPane. table))
+       (.pack)
+       (.setVisible true))))
 
 (defn row-height-update* [table]
   (fn [row val]
@@ -236,15 +231,15 @@
       (getColumnName [col]
         (names col))
       (getValueAt [row col]
-        (let [r (@tile-images row)]
+        (let [{:keys [image name x y width height]} (@tile-images row)]
           (case col
-            0  (ImageIcon. (:image r))
+            0  (ImageIcon. image)
             1 row
-            2 (:name r)
-            3 (:x r)
-            4 (:y r)
-            5 (:width r)
-            6 (:height r)
+            2 name
+            3 x
+            4 y
+            5 width
+            6 height
             7 (= (tile :current) row))))
       (isCellEditable [row col] (> col 1))
       (setValueAt [val row col]
@@ -263,14 +258,13 @@
         (class (data col))))))
 
 (defn tile-table []
-  (let [frame (JFrame. "Tile Table")
-        model (tile-table-model)
+  (let [model (tile-table-model)
         table (JTable. model)]
     (def row-height-update (row-height-update* table))
     (watch-table model (tile :get-ref :current) :tile-table)
     (watch-table model tile-images  :tile-table2)
     (.setRowHeight table (+ 2 (second (tile :size))))
-    (doto frame
+    (doto (JFrame. "Tile Table")
       (.add (JScrollPane. table))
       (.pack)
       (.setVisible true))))
@@ -297,7 +291,7 @@
     (apply str (drop-last (count filename) path))))
 
 (defn load-tile-map* [filename]  
-  (let [lines   (line-seq (java.io.BufferedReader. (java.io.StringReader. (slurp filename))))
+  (let [lines (line-seq (java.io.BufferedReader. (java.io.StringReader. (slurp filename))))
         path (str (only-path (java.io.File. filename)) (first lines))
         image (tile :image  (java.io.File. path))]
     (vec (for [x (rest lines)]
@@ -322,13 +316,6 @@
         value {:tile index :active true}]
     (zipmap data (repeat value))))
 
-
-
-;(defn get-relative-path [to from]  ;; (get-relative-path "/home/thomas/dev/clojure/ballz/background/bg_1_2.png" /home/thomas")
-;  (apply str (drop (count from) to)))
-
-
-
 (def-object loaded-level
   [data (ref '())
    file (ref nil)]
@@ -339,8 +326,6 @@
    :data (fn [] @data)
    :name (fn [] (.getName @file))
    :path (fn [] (.getPath @file))})
-
-(def level-list (ref '()))
 
 (defn load-level* [file]
   (let [x (loaded-level :load file)
@@ -403,32 +388,26 @@
         (doseq-to level
                   #(.write f (println-str %)))))))
 
-
 (def menus
-  ["New Tile Map"
-   (fn [parent]
-     (tilemap-dialog parent))
+  ["New Tile Map" 
+   (fn [parent] (tilemap-dialog parent))
    "Load Tile Map"
-   (fn [parent]
-     (load-tile-map parent ))
+   (fn [parent] (load-tile-map parent ))
    "Save Tile Map"
-   (fn [parent]
-     (save-tile-map parent))
+   (fn [parent] (save-tile-map parent))
    "Load Level"
-   (fn [parent]
-     (load-level parent))
+   (fn [parent] (load-level parent))
    "Save Level"
    (fn [parent] (save-level parent))
    "Background Image"
-   (fn [parent]
-     (background-dialog parent))
+   (fn [parent] (background-dialog parent))
    "Screen Size"
    (fn [parent]
      (let [sizes (into-array (vec (map #(str (key %) " " (val %)) screen-sizes)))
            selected  (JOptionPane/showInputDialog parent "Choose Device" "Screen Size" JOptionPane/INFORMATION_MESSAGE nil sizes (first sizes))]
        (when selected
          (dosync (ref-set screen-size ((read-string selected) screen-sizes))))))
-   "World Table"      (fn [_] (world-table))
+   "World Table" (fn [_] (world-table))
    "Tile Table"  (fn [_] (tile-table))
    "Quit" (fn [_] (System/exit 0))])
 
@@ -452,7 +431,13 @@
         (dosync
          (alter levelmap
                 (if (= (.getButton e) (java.awt.event.MouseEvent/BUTTON3))
-                  #(dissoc % c)
+                  #(dissoc %
+                           (ffirst
+                            (filter (fn [[[tx ty] {:keys [tile]}]]
+                                      (let [{:keys [width height]} (@tile-images tile)]
+                                        (and (< tx x (+ tx width))
+                                             (< ty y (+ ty height)))))
+                                    @levelmap)))
                   #(conj % {c {:tile (tile :current) :active true}}))))))
     (mouseEntered [e] )
     (mouseExited [e])
@@ -472,9 +457,8 @@
       (.drawRect g2 0 0 w h)                          
       (draw-grid g2 w h rx ry)
       (when @tile-images
-        (doseq [n (filter (comp :active val) @levelmap)]
-          (let [img (:image (@tile-images (:tile (val n))))
-                [x y] (key n)]
+        (doseq [[[x y] {:keys [tile]}] (filter (comp :active val) @levelmap)]
+          (let [img (:image (@tile-images tile))]
             (.drawImage g2 img nil (int x) (int y)))))
       (.setColor g2 (Color. 200 0 0))
       (.setStroke g2 (BasicStroke. (float 2)))
@@ -485,25 +469,23 @@
 (defn World [parent]
   (let [frame (JFrame. "World")
         [x y] (map * @screen-size @world-size)
-        world (world-panel)
-        timer (Timer. 60 world)
-        scroll-pane (JScrollPane.)]
+        world (doto (world-panel)
+                (.addMouseListener (world-listener))
+                (.setPreferredSize (Dimension. x y)))
+        scroll-pane (doto (JScrollPane.)
+                      (.setPreferredSize (Dimension. x y))
+                      (.setViewportView world))]
      (add-watch world-size :world (fn [r k old [x y]]
                                    (let [[w h] (map * [x y] @screen-size)]
                                      (.setPreferredSize world (Dimension. w h))
                                      (.setSize world (Dimension. w h)))))
-    (doto world
-      (.addMouseListener (world-listener))
-      (.setPreferredSize (Dimension. x y)))
-    (doto scroll-pane
-      (.setPreferredSize (Dimension. x y))
-      (.setViewportView world))
+    (doto (Timer. 60 world)
+      (.start))
     (doto frame
       (.setLocationRelativeTo parent)
       (.add scroll-pane BorderLayout/CENTER)
       (.pack)
-      (.setVisible true))
-    (.start timer)))
+      (.setVisible true))))
 
 (defn ctile-panel []
   (proxy [JPanel ActionListener] []
@@ -531,58 +513,54 @@
   ([p c x y w h]
      (.add p c (spr-layout x y w h))))
 
-(defn add-spinner-listener [spinner func]
-  (.addChangeListener spinner
-                      (proxy [ChangeListener] []
-                        (stateChanged [e]
-                          (let [v (.getValue (.getSource e))]
-                            (func v))))))
-
 (defn set-accelerator [ menu-item k ]
   (.setAccelerator menu-item (javax.swing.KeyStroke/getKeyStroke k (java.awt.event.InputEvent/CTRL_MASK))))
 
 (defmacro key-event [ menu-item ev  ]
   `(set-accelerator ~menu-item (. java.awt.event.KeyEvent ~ev)))
-      
+
+(defn spinner [init min max step listener]
+  (doto (JSpinner. (SpinnerNumberModel. init min max step))
+     (.addChangeListener 
+      (proxy [ChangeListener] []
+        (stateChanged [e]
+          (let [v (.getValue (.getSource e))]
+            (listener v)))))))
+
 (defn App []                         
   (let [frame (JFrame. "Level Editor")
-        spinnerx (JSpinner. (SpinnerNumberModel. (first @raster) 1 256 1))
-        spinnery (JSpinner. (SpinnerNumberModel. (second @raster) 1 256 1))
-        spinnerwx (JSpinner. (SpinnerNumberModel. (first @world-size) 1 256 1))
-        spinnerwy (JSpinner. (SpinnerNumberModel. (second @world-size) 1 256 1))
+        spinnerx (spinner (first @raster) 1 256 1 (fn [v] (dosync (alter raster #(assoc % 0 v)))))
+        spinnery (spinner (second @raster) 1 256 1 (fn [v] (dosync (alter raster #(assoc % 1 v)))))
+        spinnerwx (spinner (first @world-size) 1 256 1 (fn [v] (dosync (alter world-size #(assoc % 0 v)))))
+        spinnerwy (spinner (second @world-size) 1 256 1 (fn [v] (dosync (alter world-size #(assoc % 1 v)))))
         tile (ctile-panel)
-        menu-bar (JMenuBar. )
         listener (menu-listener frame)
         menu (JMenu. "File")
-        menu-items (into [] (map #(JMenuItem. %) (map first (partition 2 menus)))) ;; (keys menus)))
-        slider (JSlider. -50 50 0)
+        menu-items (into [] (map #(doto (JMenuItem. %)
+                                    (.addActionListener listener)) (map first (partition 2 menus)))) ;; (keys menus)))
+        menu-bar (doto (JMenuBar. )
+                   (.add menu))
         interpolator1 (lin-int 1 10)
         interpolator2 (lin-int 1 (/ 1 10))
+        slider (doto (JSlider. -50 50 0)
+                 (.addChangeListener 
+                  (proxy [ChangeListener] []
+                    (stateChanged [e]
+                      (let [v (.getValue (.getSource e))
+                            s (if (pos? v)
+                                (interpolator1 (/ v 50))
+                                (interpolator2 (/ (* v -1) 50)))]
+                        (dosync (ref-set scale (float s))))))))
         timer (Timer. 60 tile)]
     (key-event (first menu-items) VK_N)
     (key-event (menu-items 3) VK_L)
     (key-event (menu-items 4) VK_S)
     (key-event (menu-items 5) VK_B)
-    (key-event (menu-items 6) VK_W)
-    (key-event (menu-items 7) VK_T)
-    (key-event (menu-items 8) VK_Q)
-    (doseq-to menu-items  #(.addActionListener % listener))
+    (key-event (menu-items 7) VK_W)
+    (key-event (menu-items 8) VK_T)
+    (key-event (menu-items 9) VK_Q)
     (doseq-to menu-items .add menu)
-    (doto menu-bar
-      (.add menu))
-    (add-spinner-listener spinnerx (fn [v] (dosync (alter raster #(assoc % 0 v)))))
-    (add-spinner-listener spinnery (fn [v] (dosync (alter raster #(assoc % 1 v)))))
-    (add-spinner-listener spinnerwx (fn [v] (dosync (alter world-size #(assoc % 0 v)))))
-    (add-spinner-listener spinnerwy (fn [v] (dosync (alter world-size #(assoc % 1 v)))))
-    (.addChangeListener slider
-                        (proxy [ChangeListener] []
-                          (stateChanged [e]
-                            (let [v (.getValue (.getSource e))
-                                  s (if (pos? v)
-                                        (interpolator1 (/ v 50))
-                                        (interpolator2 (/ (* v -1) 50)))]
-                              (dosync (ref-set scale (float s)))))))
-     (doto frame
+    (doto frame
       (.setJMenuBar menu-bar )
       (.setLayout (SpringLayout.))
       (add-component (JLabel. (ImageIcon. "fv_10.png")) 0 0 300 200)
@@ -609,3 +587,4 @@
     (.start timer)))
 
 
+(App)
