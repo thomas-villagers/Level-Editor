@@ -5,7 +5,8 @@
            (javax.swing.table AbstractTableModel)
            (javax.imageio ImageIO)
            (javax.swing.event ChangeListener TableModelListener)
-           (java.awt.event ActionListener KeyListener MouseListener MouseWheelListener  WindowAdapter))
+           (java.awt.image RescaleOp BufferedImage)
+           (java.awt.event ActionListener KeyListener MouseListener MouseMotionListener WindowAdapter))
   (:use macros))
 
 (def screen-sizes { :desire-hd [800 480] :iconia-500 [1280 800]})
@@ -45,9 +46,9 @@
    :image-name (fn [] (.getName @image-name))
    :image (fn
             ([] @image)
-            ([file] (dosync (ref-set image (ImageIO/read file))
-                            (ref-set image-name  file))
-               @image))
+            ([file]
+               (dosync (ref-set image-name  file)
+                       (ref-set image (ImageIO/read file)))))
    :tiles (fn [] @tiles) ;; TODO: ... 
    :set (fn [k v]
           (let [r (k {:size size :current current :image image :tiles tiles })]
@@ -417,32 +418,57 @@
       (actionPerformed [e]
         ((menus (.getActionCommand e)) parent)))))
 
-;; todos: -- drag Tiles in World
-;;        -- Unterstützung mehrerer Tilemaps
+;; todos: -- Unterstützung mehrerer Tilemaps
 ;;        -- raster offset
 
+(defn selected-tile [x y]
+  (ffirst
+   (filter (fn [[[tx ty] {:keys [tile]}]]
+             (let [{:keys [width height]} (@tile-images tile)]
+               (and (< tx x (+ tx width))
+                    (< ty y (+ ty height)))))
+                                    @levelmap)))
+
+(def selected (ref nil))
+(def mouse-pos (ref '()))
+
+(defn mouse-scaled [e s]
+  (vector (/ (.getX e) s) (/ (.getY e) s)))
+
 (defn world-listener []
-  (proxy [MouseListener] []
+  (proxy [MouseListener MouseMotionListener] []
     (mouseClicked [e]
-      (let [x (/ (.getX e) @scale)
-            y (/ (.getY e) @scale)
+      (let [[x y] (mouse-scaled e @scale)
             c (map quot [x y] @raster)
             c (map * c @raster)]
         (dosync
          (alter levelmap
                 (if (= (.getButton e) (java.awt.event.MouseEvent/BUTTON3))
-                  #(dissoc %
-                           (ffirst
-                            (filter (fn [[[tx ty] {:keys [tile]}]]
-                                      (let [{:keys [width height]} (@tile-images tile)]
-                                        (and (< tx x (+ tx width))
-                                             (< ty y (+ ty height)))))
-                                    @levelmap)))
+                  #(dissoc % (selected-tile x y))
                   #(conj % {c {:tile (tile :current) :active true}}))))))
     (mouseEntered [e] )
     (mouseExited [e])
-    (mousePressed [e])
-    (mouseReleased [e])))
+    (mousePressed [e]
+      (let [[x y] (mouse-scaled e @scale)]
+        (when-let [t (selected-tile x y)]
+          (dosync (ref-set selected t)
+                  (ref-set mouse-pos t)))))
+    (mouseReleased [e]
+      (when selected
+        (when-let [v (@levelmap @selected)]
+          (dosync
+           (alter levelmap #(conj (dissoc % @selected) {@mouse-pos v}))
+           (ref-set selected nil)))))
+    (mouseDragged [e]
+      (let [[x y] (mouse-scaled e @scale)]
+        (dosync (ref-set mouse-pos (list x y)))))
+    (mouseMoved [e])))
+
+(defn draw-transparent [g img [x y]]
+  (let [scales (float-array [1.0 1.0 1.0 0.7])
+        offsets (float-array [0.0 0.0 0.0 0.0])
+        op (RescaleOp. scales offsets nil)]
+    (.drawImage g img op (int x) (int y))))
 
 (defn world-panel []
   (proxy [JPanel ActionListener] [] 
@@ -459,7 +485,9 @@
       (when @tile-images
         (doseq [[[x y] {:keys [tile]}] (filter (comp :active val) @levelmap)]
           (let [img (:image (@tile-images tile))]
-            (.drawImage g2 img nil (int x) (int y)))))
+            (if (= [x y] @selected )
+              (draw-transparent g2 img @mouse-pos)
+              (.drawImage g2 img nil (int x) (int y))))))
       (.setColor g2 (Color. 200 0 0))
       (.setStroke g2 (BasicStroke. (float 2)))
       (draw-grid g2 w h (first @screen-size) (second @screen-size))))
@@ -469,8 +497,10 @@
 (defn World [parent]
   (let [frame (JFrame. "World")
         [x y] (map * @screen-size @world-size)
+        listener (world-listener)
         world (doto (world-panel)
-                (.addMouseListener (world-listener))
+                (.addMouseListener listener)
+                (.addMouseMotionListener listener)
                 (.setPreferredSize (Dimension. x y)))
         scroll-pane (doto (JScrollPane.)
                       (.setPreferredSize (Dimension. x y))
@@ -492,7 +522,8 @@
     (paintComponent [g]
       (proxy-super paintComponent g)
       (when @tile-images
-        (.drawImage g (:image (@tile-images (tile :current))) 0 0 nil)))
+        (let [image (:image (@tile-images (tile :current)))]
+          (.drawImage g image 0 0 nil))))
     (getPreferredSize []
       (let [[x y] (tile :size)]
       (Dimension. x y)))
@@ -585,6 +616,5 @@
       (.setVisible true))
     (World frame)
     (.start timer)))
-
 
 (App)
