@@ -1,6 +1,6 @@
-![Main Window](/screenshots/main.png)
+![Main Window](https://github.com/thomas-villagers/Level-Editor/blob/master/screenshots/main.png)
 
-![Tiles](/screenshots/tiles.png)
+![Tiles](https://github.com/thomas-villagers/Level-Editor/blob/master/screenshots/tiles.png)
 
-![Tile Table](/screenshots/tiletable.png)
+![Tile Table](https://github.com/thomas-villagers/Level-Editor/blob/master/screenshots/tiletable.png)
 
