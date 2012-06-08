@@ -432,13 +432,15 @@
   (proxy [MouseListener MouseMotionListener] []
     (mouseClicked [e]
       (let [[x y] (mouse-scaled e @scale)
-            c (map quot [x y] @raster)
-            c (map * c @raster)]
-        (dosync
-         (alter levelmap
-                (if (= (.getButton e) (java.awt.event.MouseEvent/BUTTON3))
-                  #(dissoc % (selected-tile x y))
-                  #(conj % {c {:tile (tile :current) :active true}}))))))
+            c (map * (map quot [x y] @raster) @raster)]
+        (if (= (.getButton e) (java.awt.event.MouseEvent/BUTTON2))
+          (when-let [t (selected-tile x y)]
+            (tile :current (:tile (@levelmap t))))
+          (dosync
+           (alter levelmap
+                  (if (= (.getButton e) (java.awt.event.MouseEvent/BUTTON3))
+                    #(dissoc % (selected-tile x y))
+                    #(conj % {c {:tile (tile :current) :active true}})))))))
     (mouseEntered [e] )
     (mouseExited [e])
     (mousePressed [e]
