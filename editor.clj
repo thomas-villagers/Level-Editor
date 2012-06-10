@@ -18,7 +18,6 @@
 (def screen-size (ref (screen-sizes :iconia-500)))
 (def world-size (ref [1 1]))
 (def current-path (ref  "."))
-(def level-list (ref '()))
 
 (declare show-tilemap row-height-update draw-grid)
 
@@ -51,10 +50,7 @@
             ([file]
                (dosync (ref-set image-name  file)
                        (ref-set image (ImageIO/read file)))))
-   :tiles (fn [] @tiles) ;; TODO: ... 
-   :set (fn [k v]
-          (let [r (k {:size size :current current :image image :tiles tiles })]
-            (dosync (ref-set r v))))})
+   :tiles (fn [] @tiles)}) ;; TODO: ... 
 
 (defn update-tile-image [ image {:keys[x y width height] :as tile}]
   (let [iw (.getWidth image)
@@ -66,12 +62,9 @@
 (defn make-tile-images [image w h]
   (let [size [(.getWidth image) (.getHeight image)]
         [nx ny] (map quot size [w h])
-        coords (for [y (range ny) x (range nx)]
-                 [x y])]
-    (vec (map #(hash-map :image (.getSubimage image (* w (first %)) (* h (second %)) w h)
-                         :name nil
-                         :x (* w (first %)) :y (* h (second %))
-                         :width w  :height h) coords))))
+        coords (for [y (range ny) x (range nx)] (map * [w h] [x y]))]
+    (vec (map (fn [[x y]]
+                (hash-map :image (.getSubimage image x y w h) :name nil :x x :y y :width w  :height h)) coords))))
 
 (defn init-tilemap [file ]
   (let [image (tile :image file)
@@ -79,8 +72,13 @@
     (dosync (ref-set tile-images (make-tile-images image w h)))
     (show-tilemap)))
 
+(defn only-path [file]
+  (let [filename (.getName file)
+        path (.getPath file)]
+    (apply str (drop-last (count filename) path))))
+
 (defn chooser-dialog [type parent desc exts title ]
-  (let [filter (javax.swing.filechooser.FileNameExtensionFilter. desc exts)
+  (let [filter (javax.swing.filechooser.FileNameExtensionFilter. desc (into-array exts))
         chooser (doto (JFileChooser. (java.io.File. @current-path))
                   (.setFileFilter filter)
                   (.setDialogTitle title))
@@ -88,7 +86,9 @@
                 (.showOpenDialog chooser parent)
                 (.showSaveDialog chooser parent))]
     (when (= value JFileChooser/APPROVE_OPTION)
-      (.getSelectedFile chooser))))
+      (let [f (.getSelectedFile chooser)]
+        (dosync (ref-set current-path (only-path f)))
+        f))))
   
 (defn open-dialog [parent desc exts title]
   (chooser-dialog :load parent desc exts title))
@@ -97,11 +97,24 @@
   (chooser-dialog :save parent desc exts title))
                                   
 (defn open-dialog-png [parent title]
-  (open-dialog parent "PNG Images" (into-array [ "png" ]) title))
+  (open-dialog parent "PNG Images" [ "png" ]  title))
 
 (defn background-dialog [parent]
   (when-let [file (open-dialog-png parent "Load Background Image")]
     (background :load file)))
+
+(defn spr-layout
+  ([x y w h] (javax.swing.SpringLayout$Constraints. (Spring/constant x) (Spring/constant y) (Spring/constant w) (Spring/constant h)))
+  ([x y]     (javax.swing.SpringLayout$Constraints. (Spring/constant x) (Spring/constant y))))
+
+(defn add-component
+  ([p c] (.add p c))
+  ([p c x y] (.add p c (spr-layout x y)))
+  ([p c x y w h] (.add p c (spr-layout x y w h))))
+
+(defmacro add-components [parent & components]
+  (let [fs (map #(list* 'add-component parent (if (list? %) % (list %))) components)]
+    `(do ~@fs)))
 
 (defn tilemap-dialog [parent]                
   (let [dialog (JDialog. parent)
@@ -121,10 +134,7 @@
     (doto dialog
       (.setTitle "Tile Size")
       (.setLayout (GridLayout. 4 0))
-      (.add (JLabel. "Choose Tile Size"))
-      (.add spinnerx)
-      (.add spinnery)
-      (.add button)
+      (add-components ((JLabel. "Choose Tile Size")) spinnerx spinnery button)
       (.setSize 175 125)
       (.show ))))
 
@@ -148,16 +158,11 @@
       (setValueAt [val row col]        
         (let [[k v] ((vec @levelmap) row)]
           (case col
-            0 (dosync
-               (alter levelmap #(dissoc % k))
-               (alter levelmap #(conj % { (list val (second k)) v})))
-            1 (dosync
-               (alter levelmap #(dissoc % k))
-               (alter levelmap #(conj % { (list (first k) val) v})))
+            0 (dosync (alter levelmap #(conj (dissoc % k) { (list val (second k)) v})))
+            1 (dosync (alter levelmap #(conj (dissoc % k) { (list (first k) val) v})))
             2 (when (< val (count @tile-images))
                 (dosync (alter levelmap #(assoc % k (assoc v :tile val)))))
-            3 (dosync
-                (alter levelmap #(assoc % k (assoc v :active val))))))) 
+            3 (dosync (alter levelmap #(assoc % k (assoc v :active val))))))) 
       (getColumnClass [col]
         (let [[[x y] {:keys [tile active]}]  ((vec @levelmap) 0)]
           (class ([x y tile active] col)))))))
@@ -230,21 +235,14 @@
         fp (.toURI (java.io.File. path))]
     (.getPath (.relativize fb fp))))
 
-(defn only-path [file]
-  (let [filename (.getName file)
-        path (.getPath file)]
-    (apply str (drop-last (count filename) path))))
-
 (defn save-tile-map [parent]
-  (when-let [file (save-dialog parent "Tile Maps" (into-array [ "tile" ]) "Save Tile Map")]
+  (when-let [file (save-dialog parent "Tile Maps" [ "tile" ] "Save Tile Map")]
     (with-open [f (clojure.java.io/writer file)]
-      (do
-        (println (tile :image-name))
-        (.write f (println-str (tile :image-name)))
-        (let [tiles (remove (comp nil? :name) @tile-images)
-              func (juxt :name :x :y :width :height)]
-          (doseq-to tiles
-                    #(.write f (println-str (apply list (func %))))))))))
+      (.write f (println-str (tile :image-name)))
+      (let [tiles (remove (comp nil? :name) @tile-images)
+            func (juxt :name :x :y :width :height)]
+        (doseq-to tiles
+                  #(.write f (println-str (apply list (func %)))))))))
 
 (defn load-tile-map* [filename]  
   (let [lines (line-seq (java.io.BufferedReader. (java.io.StringReader. (slurp filename))))
@@ -254,9 +252,8 @@
            (update-tile-image image (conj (zipmap [:name :x :y :width :height] (read-string x)) {:image :nil}))))))
 
 (defn load-tile-map [parent]
-  (when-let [file (open-dialog parent "Tile files" (into-array [ "tile" ]) "Load Tile Map")]
-    (dosync (ref-set tile-images (load-tile-map* (.getPath file)))
-            (ref-set current-path (only-path file)))
+  (when-let [file (open-dialog parent "Tile files" [ "tile" ]  "Load Tile Map")]
+    (dosync (ref-set tile-images (load-tile-map* (.getPath file))))
     (tile :current 0)
     (show-tilemap)))
 
@@ -265,16 +262,15 @@
     (binding [*read-eval* false]
       (reduce conj [] (read rdr)))))
 
-(defn parse-object-from-list [ line ]
-  (let [name (first line)
-        {:keys [width height] :as tile} (first (filter #(= (:name %) name) @tile-images))
-        data (map #(map - % [(* 0.5 width)  (* 0.5 height)]) (rest line))
+(defn parse-object-from-list [ [name & line] ]
+  (let [{:keys [width height] :as tile} (first (filter #(= (:name %) name) @tile-images))
+        data (map #(map - % [(* 0.5 width)  (* 0.5 height)]) line)
         index (.indexOf @tile-images tile )
         value {:tile index :active true}]
     (zipmap data (repeat value))))
 
 (def-object loaded-level
-  [data (ref '())
+  [data (ref ())
    file (ref nil)]
   {:load (fn [f]
           (dosync
@@ -290,19 +286,16 @@
         bgr-image ((comp str second first ) (filter #(= 'textures (first %)) x))
         o (filter #(= 'objects (first %)) x)]
     (background :load (java.io.File. (str path bgr-image)))
-    (dosync (ref-set current-path path)
-            (ref-set level-list x)
-            (ref-set levelmap
+    (dosync (ref-set levelmap
                      (into {} (map parse-object-from-list (rest (first o))))))))
 
 (defn load-level [parent]
   (when-not @tile-images
     (JOptionPane/showMessageDialog parent "Load a tile map first","Info", JOptionPane/INFORMATION_MESSAGE)
     (load-tile-map parent))
-  (when-let [file (open-dialog parent "Level files" (into-array [ "clj" ]) "Load Level")]
+  (when-let [file (open-dialog parent "Level files" [ "clj" ]  "Load Level")]
     (load-level* file)))
 
-;; 1. step: levelmap to list !
 (defn level-to-list [level]
   (let [tile-nrs (distinct (map (comp :tile val) level))
         to-int (fn [x] (map #(int %) x))]
@@ -315,12 +308,11 @@
                                sh-objs (map #(to-int (map + [width height] %)) objs)]
                            (cons name sh-objs))) tile-nrs)))))
 
-;; takes a loaded level list and replaces background and objects 
 (defn adjust-level [level-list back]
   (let [textures (first (filter #(= 'textures (first %)) level-list))
         it (.indexOf level-list textures)
         io (.indexOf level-list (first (filter #(= 'objects (first %)) level-list)))
-        new-list (assoc level-list it (list* (first textures) back (rest (rest textures))))]
+        new-list (assoc level-list it (list* (first textures) back (nnext textures)))] ;;(rest (rest textures))))]
    (assoc new-list io (level-to-list @levelmap))))  ;; ACHTUNG
 
 (defn new-level-list [back]
@@ -332,47 +324,38 @@
             '(dynamic-objects (ball (100 100))))))
 
 (defn save-level [parent]
-  (when-let [file (save-dialog parent "Levels" (into-array [ "lvl" ]) "Save Level")]
+  (when-let [file (save-dialog parent "Levels" [ "lvl" ] "Save Level")]
     (let [path (only-path file)
           background-path (if (background :image)
                             (get-relative-path path (background :path))
                             "background.png")
-          level (if (empty? @level-list)
+          level (if (empty? (loaded-level :data))
                   (new-level-list background-path)
-                  (adjust-level @level-list background-path))]
+                  (adjust-level (loaded-level :data) background-path))]
       (println level)
-      (dosync (ref-set current-path path))
       (with-open [f (clojure.java.io/writer file)]
         (doseq-to level
                   #(.write f (println-str %)))))))
 
-(def menus
-  ["New Tile Map" 
-   (fn [parent] (tilemap-dialog parent))
-   "Load Tile Map"
-   (fn [parent] (load-tile-map parent ))
-   "Save Tile Map"
-   (fn [parent] (save-tile-map parent))
-   "Load Level"
-   (fn [parent] (load-level parent))
-   "Save Level"
-   (fn [parent] (save-level parent))
-   "Background Image"
-   (fn [parent] (background-dialog parent))
-   "Screen Size"
-   (fn [parent]
-     (let [sizes (into-array (vec (map #(str (key %) " " (val %)) screen-sizes)))]
-       (when-let [selected (JOptionPane/showInputDialog parent "Choose Device" "Screen Size" JOptionPane/INFORMATION_MESSAGE nil sizes (first sizes))]
-         (dosync (ref-set screen-size ((read-string selected) screen-sizes))))))
-   "World Table" (fn [_] (world-table))
-   "Tile Table"  (fn [_] (tile-table))
-   "Quit" (fn [_] (System/exit 0))])
+(defmacro key-event [ ev ]
+  `(. java.awt.event.KeyEvent ~ev))
 
-(defn menu-listener [parent]
-  (let [menus (apply hash-map menus)]
-    (proxy [ActionListener] []
-      (actionPerformed [e]
-        ((menus (.getActionCommand e)) parent)))))
+(def menus
+  (array-map 
+   "New Tile Map"  [(fn [] (tilemap-dialog nil)) (key-event VK_N)]
+   "Load Tile Map" [(fn [] (load-tile-map nil ))]
+   "Save Tile Map" [(fn [] (save-tile-map nil))]
+   "Load Level"    [(fn [] (load-level nil)) (key-event VK_L)]
+   "Save Level"    [(fn [] (save-level nil)) (key-event VK_S)]
+   "Background Image" [(fn [] (background-dialog nil)) (key-event VK_B)]
+   "Screen Size"
+   [(fn []
+     (let [sizes (into-array (vec (map #(str (key %) " " (val %)) screen-sizes)))]
+       (when-let [selected (JOptionPane/showInputDialog nil "Choose Device" "Screen Size" JOptionPane/INFORMATION_MESSAGE nil sizes (first sizes))]
+         (dosync (ref-set screen-size ((read-string selected) screen-sizes))))))]
+   "World Table" [(fn [] (world-table)) (key-event VK_W)]
+   "Tile Table"  [(fn [] (tile-table)) (key-event VK_T)]
+   "Quit" [(fn [] (System/exit 0)) (key-event VK_Q)]))
 
 (defn-object undo-redo [state]
   [undos (ref [])
@@ -398,16 +381,16 @@
 
 (defn key-listener []
   (proxy [KeyListener] []
-      (keyPressed [e]
-        (let [code (.getKeyCode e)]
-          (when (.isControlDown e)
-            (cond
-             (= code (java.awt.event.KeyEvent/VK_Y))
-             (undo-redo :redo)
-             (= code (java.awt.event.KeyEvent/VK_Z))
-             (undo-redo :undo)))))
-      (keyReleased [e])
-      (keyTyped [e])))
+    (keyPressed [e]
+      (let [code (.getKeyCode e)]
+        (when (.isControlDown e)
+          (cond
+           (= code (key-event VK_Y))
+           (undo-redo :redo)
+           (= code (key-event VK_Z))
+           (undo-redo :undo)))))
+    (keyReleased [e])
+    (keyTyped [e])))
 
 ;; todos: -- Unterstützung mehrerer Tilemaps
 ;;        -- raster offset
@@ -418,11 +401,10 @@
      (filter (fn [[[tx ty] {:keys [tile]}]]
                (let [{:keys [width height]} (@tile-images tile)]
                  (and (< tx x (+ tx width))
-                      (< ty y (+ ty height)))))
-             @levelmap))))
+                      (< ty y (+ ty height))))) @levelmap))))
 
 (def selected (ref nil))
-(def mouse-pos (ref '()))
+(def mouse-pos (ref ()))
 (def tile-offset (ref '(0 0)))
 
 (defn mouse-scaled [e s]
@@ -448,7 +430,7 @@
         (when-let [t (selected-tile x y)]
           (dosync (ref-set selected t)
                   (ref-set tile-offset (map - [x y] t))
-                  (ref-set mouse-pos (list x y))))))
+                  (ref-set mouse-pos [x y])))))
     (mouseReleased [e]
       (when-let [v (@levelmap @selected)]
         (let [[x y] (mouse-scaled e @scale)
@@ -456,21 +438,18 @@
           (dosync
            (alter levelmap #(conj (dissoc % @selected)
                                   {(if (= (.getButton e) (java.awt.event.MouseEvent/BUTTON3))
-                                     (map * (map quot new-pos @raster) @raster)
-                                     new-pos) v}))
+                                     new-pos
+                                     (map * (map quot new-pos @raster) @raster)) v}))
            (ref-set selected nil)))))
     (mouseDragged [e]
       (let [[x y] (mouse-scaled e @scale)]
-        (dosync
-         (ref-set mouse-pos (list x y)))))
+        (dosync (ref-set mouse-pos [x y]))))
     (mouseMoved [e])))
 
 (defn tilemap-listener [image-w image-h]
   (proxy [MouseListener] []
     (mouseClicked [e]
-      (let [[w h] (tile :size)
-            mx (.getX e)
-            my (.getY e)
+      (let [[mx my] [(.getX e) (.getY e)]
             xtiles (filter (fn [{:keys [x width]}] (< x mx (+ width x))) @tile-images)
             ytiles (filter (fn [{:keys [y height]}] (< y my (+ y height))) xtiles)
             index (.indexOf @tile-images (first ytiles))]
@@ -507,7 +486,7 @@
            g2 (.create g)
            [rx ry] @raster]
        (.scale g2 @scale @scale)
-       (when-let [back  (background :image)]
+       (when-let [back (background :image)]
          (.drawImage g2 back nil (int 0) (int 0)))
        (.drawRect g2 0 0 w h)                          
        (draw-grid g2 w h rx ry)
@@ -532,36 +511,21 @@
   (panel
    (fn [g]
      (.drawImage g image 0 0 nil)
-     (doseq [{:keys  [x y width height]} @tile-images]
+     (doseq [{:keys [x y width height]} @tile-images]
        (.drawRect g x y width height)))))
 
 (defn lin-int [a b]
-  (fn [t]
-    (+ a (* t (- b a)))))
-
-(defn spr-layout
-  ([x y w h] (javax.swing.SpringLayout$Constraints. (Spring/constant x) (Spring/constant y) (Spring/constant w) (Spring/constant h)))
-  ([x y]     (javax.swing.SpringLayout$Constraints. (Spring/constant x) (Spring/constant y))))
-
-(defn add-component
-  ([p c x y]
-     (.add p c (spr-layout x y)))
-  ([p c x y w h]
-     (.add p c (spr-layout x y w h))))
+  (fn [t] (+ a (* t (- b a)))))
 
 (defn set-accelerator [ menu-item k ]
-  (.setAccelerator menu-item (javax.swing.KeyStroke/getKeyStroke k (java.awt.event.InputEvent/CTRL_MASK))))
-
-(defmacro accelerator-event [ menu-item ev  ]
-  `(set-accelerator ~menu-item (. java.awt.event.KeyEvent ~ev)))
+  (when k (.setAccelerator menu-item (javax.swing.KeyStroke/getKeyStroke k (java.awt.event.InputEvent/CTRL_MASK)))))
 
 (defn spinner [init min max step listener]
   (doto (JSpinner. (SpinnerNumberModel. init min max step))
      (.addChangeListener 
       (proxy [ChangeListener] []
         (stateChanged [e]
-          (let [v (.getValue (.getSource e))]
-            (listener v)))))))
+          (listener (.getValue (.getSource e))))))))
 
 (defn show-tilemap [ ]
   (let [image (tile :image)
@@ -608,24 +572,24 @@
      (proxy [ActionListener] []
        (actionPerformed [e]
          (action))))))
-      
+
+(defn jmenu [ text & acc ]
+  (doto (JMenu. text) (.setMnemonic (first acc))))
+
 (defn App []                         
   (let [frame (JFrame. "Level Editor")
         spinnerx (spinner (first @raster) 1 256 1 (fn [v] (dosync (alter raster #(assoc % 0 v)))))
         spinnery (spinner (second @raster) 1 256 1 (fn [v] (dosync (alter raster #(assoc % 1 v)))))
         spinnerwx (spinner (first @world-size) 1 256 1 (fn [v] (dosync (alter world-size #(assoc % 0 v)))))
         spinnerwy (spinner (second @world-size) 1 256 1 (fn [v] (dosync (alter world-size #(assoc % 1 v)))))
-        listener (menu-listener frame)
-        menu (doto (JMenu. "File")
-               (.setMnemonic java.awt.event.KeyEvent/VK_F))
-        edit (doto (JMenu. "Edit")
-               (.setMnemonic java.awt.event.KeyEvent/VK_E))
+        menu (jmenu "File" (key-event VK_F))
+        edit (doto (jmenu "Edit" (key-event VK_E))
+               (.add (menu-item "undo" #(undo-redo :undo) (key-event VK_Z)))
+               (.add (menu-item "redo" #(undo-redo :redo) (key-event VK_Y))))
         tile (ctile-panel)
-        menu-items (into [] (map #(doto (JMenuItem. %)
-                                    (.addActionListener listener)) (map first (partition 2 menus)))) ;; (keys menus)))
-        menu-bar (doto (JMenuBar. )
-                   (.add menu)
-                   (.add edit))
+        menu-items (into [] (map (fn [[k [action accel]]]
+                                   (menu-item k action accel)) menus))
+        menu-bar (doto (JMenuBar.) (add-components menu edit))
         interpolator1 (lin-int 1 10)
         interpolator2 (lin-int 1 (/ 1 10))
         slider (doto (JSlider. -50 50 0)
@@ -637,36 +601,23 @@
                                 (interpolator1 (/ v 50))
                                 (interpolator2 (/ (* v -1) 50)))]
                         (dosync (ref-set scale (float s))))))))]
-    (accelerator-event (first menu-items) VK_N)
-    (accelerator-event (menu-items 3) VK_L)
-    (accelerator-event (menu-items 4) VK_S)
-    (accelerator-event (menu-items 5) VK_B)
-    (accelerator-event (menu-items 7) VK_W)
-    (accelerator-event (menu-items 8) VK_T)
-    (accelerator-event (menu-items 9) VK_Q)
     (doseq-to menu-items .add menu)
-    (.add edit (menu-item "undo" #(undo-redo :undo) java.awt.event.KeyEvent/VK_Z))
-    (.add edit (menu-item "redo" #(undo-redo :redo) java.awt.event.KeyEvent/VK_Y))
     (doto frame
       (.setJMenuBar menu-bar )
       (.setLayout (SpringLayout.))
-      (add-component (JLabel. (ImageIcon. "fv_10.png")) 0 0 300 200)
-      (add-component (JLabel. "Grid Size") 0 185)
-      (add-component (JLabel. "w") 5 215)
-      (add-component spinnerx  20 215)
-      (add-component (JLabel. "h") 85 215)
-      (add-component spinnery 100 215)
-      (add-component (JLabel. "World Size")  0 255)
-      (add-component (JLabel. "x") 5 285)
-      (add-component spinnerwx 20 285)
-      (add-component (JLabel. "y") 85 285)
-      (add-component spinnerwy 100 285)
-      (add-component (JSeparator. javax.swing.SwingConstants/HORIZONTAL) 0 315 300 10)
-      (add-component (JLabel. "Current Tile") 0 325)
-      (add-component tile 50 360 64 64)
-      (add-component (JSeparator. javax.swing.SwingConstants/HORIZONTAL) 0 445 300 10)
-      (add-component (JLabel. "Zoom") 0 455)
-      (add-component slider 5 490)
+      (add-components ((JLabel. (ImageIcon. "fv_10.png")) 0 0 300 200)
+                       ((JLabel. "Grid Size") 0 185)
+                       ((JLabel. "w") 5 215)  (spinnerx  20 215)
+                       ((JLabel. "h") 85 215) (spinnery 100 215)
+                       ((JLabel. "World Size")  0 255)
+                       ((JLabel. "x") 5 285)  (spinnerwx 20 285)
+                       ((JLabel. "y") 85 285) (spinnerwy 100 285)
+                       ((JSeparator. javax.swing.SwingConstants/HORIZONTAL) 0 315 300 10)
+                       ((JLabel. "Current Tile") 0 325)
+                       (tile 50 360 64 64)
+                       ((JSeparator. javax.swing.SwingConstants/HORIZONTAL) 0 445 300 10)
+                       ((JLabel. "Zoom") 0 455)
+                       (slider 5 490))
       (.pack)
       (.setSize (Dimension. 300 600))
       (.setVisible true))
